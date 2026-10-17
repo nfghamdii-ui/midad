@@ -75,3 +75,6 @@ revoke all on midad.page_versions from public, anon, authenticated;
 grant select on midad.page_versions to authenticated;
 grant all on midad.page_versions to service_role;
 revoke execute on function midad.snapshot_page() from public, anon, authenticated;
+
+-- تحديث ذاكرة الـ API فوراً حتى تظهر الدوال والجداول الجديدة
+notify pgrst, 'reload schema';

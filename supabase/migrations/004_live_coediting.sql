@@ -42,3 +42,6 @@ end $$;
 
 revoke execute on function midad.save_pages(uuid, jsonb) from public, anon;
 grant execute on function midad.save_pages(uuid, jsonb) to authenticated;
+
+-- تحديث ذاكرة الـ API فوراً حتى تظهر الدوال والجداول الجديدة
+notify pgrst, 'reload schema';
