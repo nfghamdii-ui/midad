@@ -1864,22 +1864,62 @@ const api={
   openPage,renderPage,
   save,setStatus,toast,
   // يستبدل صفحات وصلت من الخادم؛ لا يعيد رسم الصفحة المفتوحة إذا كان المستخدم يكتب فيها الآن
-  applyRemote(upserts,deletes,force){
-    const cur=db.current,editing=document.activeElement&&$('#main').contains(document.activeElement)&&document.activeElement!==document.body;
-    let curChanged=false;
+  // يطبّق صفحات وصلت من الخادم (بعد دمجها في cloud.js). يحافظ على هوية الكائنات حتى تبقى
+  // المحررات المفتوحة مرتبطة بها، ويعيد رسم الصفحة المفتوحة مع إبقاء المؤشر في مكانه.
+  applyRemote(upserts,deletes){
+    const cur=db.current;let touchCur=false;
     upserts.forEach(p=>{
       const old=db.pages[p.id];
-      if(p.id===cur){if(editing&&!force)return;curChanged=true}
-      // ندمج في نفس الكائن حتى تبقى المراجع التي تمسكها المحررات المفتوحة صالحة
-      if(old){Object.keys(old).forEach(k=>{if(!(k in p))delete old[k]});Object.assign(old,p)}else db.pages[p.id]=p;
+      if(isShown(p))touchCur=true;
+      if(old)reconcile(old,p);else db.pages[p.id]=p;
     });
-    deletes.forEach(id=>{if(id===cur)curChanged=true;delete db.pages[id]});
-    if(!db.pages[db.current]||!alive(db.pages[db.current]))db.current=(firstRoot()||newRoot()).id,curChanged=true;
-    renderSide();
-    if(curChanged&&!editing)renderPage();
+    deletes.forEach(id=>{const o=db.pages[id];if(o&&isShown(o))touchCur=true;delete db.pages[id]});
+    if(!db.pages[db.current]||!alive(db.pages[db.current]))db.current=(firstRoot()||newRoot()).id,touchCur=true;
+    renderSideSoon();
+    if(touchCur)liveRender();
     opts.cacheLocal(db);
   }
 };
+function isShown(p){const cur=db.current;return p.id===cur||p.parent===cur||(p.parent&&!!document.querySelector('[data-dbhost="'+p.parent+'"]'))||(page()&&(page().blocks||[]).some(b=>b.pageId===p.id))}
+const hasIds=a=>Array.isArray(a)&&a.length>0&&a.every(x=>x&&typeof x==='object'&&typeof x.id==='string');
+function reconcile(old,nu){
+  Object.keys(old).forEach(k=>{if(!(k in nu))delete old[k]});
+  for(const k in nu){
+    const v=nu[k],o=old[k];
+    if(hasIds(v)&&Array.isArray(o)){const by=new Map(o.filter(x=>x&&x.id).map(x=>[x.id,x]));old[k]=v.map(x=>{const e=by.get(x.id);if(e&&e!==x){reconcile(e,x);return e}return x})}
+    else if(v&&typeof v==='object'&&!Array.isArray(v)&&o&&typeof o==='object'&&!Array.isArray(o)&&o!==v)reconcile(o,v);
+    else old[k]=v;
+  }
+}
+// لا نعيد الرسم والمستخدم يسحب، أو يكتب بلوحة مفاتيح تركيبية، أو يحدد نصاً، أو قائمة مفتوحة
+let pointerDown=false,composing=false,liveT=null;
+document.addEventListener('pointerdown',()=>pointerDown=true,true);
+document.addEventListener('pointerup',()=>{pointerDown=false},true);
+document.addEventListener('pointercancel',()=>{pointerDown=false},true);
+document.addEventListener('compositionstart',()=>composing=true,true);
+document.addEventListener('compositionend',()=>{composing=false},true);
+function busy(){
+  const sel=getSelection();
+  return pointerDown||composing||(sel&&sel.rangeCount&&!sel.isCollapsed)||!popEl.hidden||!$('#slash').hidden||!fmtEl.hidden||menu.open;
+}
+function liveRender(){
+  clearTimeout(liveT);
+  if(busy()){liveT=setTimeout(liveRender,300);return}
+  const a=document.activeElement,main=$('#main'),top=main.scrollTop;let restore=null;
+  if(a&&main.contains(a)&&a!==document.body){
+    let off=a.isContentEditable?caretOffset(a):null;const before=a.textContent;
+    // إن أضاف زميل نصاً قبل المؤشر في نفس السطر، نزحزح المؤشر معه
+    const shift=el=>{if(off==null||!el)return off;const now=el.textContent;let i=0;const m=Math.min(before.length,now.length);while(i<m&&before[i]===now[i])i++;let z=0;while(z<m-i&&before[before.length-1-z]===now[now.length-1-z])z++;return before.length-z<=off&&i<off?off+(now.length-before.length):off};
+    const blk=a.closest('[data-id]'),row=a.closest('[data-row]');
+    if(a.id==='title')restore=()=>{const t=$('#title');if(t){t.focus();const o=shift(t);if(o!=null)setCaret(t,Math.min(o,t.textContent.length))}};
+    else if(row)restore=()=>{const t=document.querySelector('[data-row="'+row.dataset.row+'"] .ttl');if(t){t.focus();const o=shift(t);if(o!=null)setCaret(t,Math.min(o,t.textContent.length))}};
+    else if(blk&&off!=null)restore=()=>focusBlock(blk.dataset.id,shift(contentOf(blk.dataset.id)));
+  }
+  renderPage();
+  main.scrollTop=top;
+  if(restore)restore();
+}
+
 if(opts.onReady)opts.onReady(api);
 return api;
 };

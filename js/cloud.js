@@ -14,20 +14,22 @@ const $ = s => document.querySelector(s);
 const PREFS = 'midad-prefs';
 const LAST_WS = 'midad-last-ws';
 
-const st = { user: null, ws: null, role: null, workspaces: [], sent: new Map(), queue: Promise.resolve(), channel: null, api: null, dirty: false, members: {}, raw: new Map() };
+const st = { user: null, ws: null, role: null, workspaces: [], sent: new Map(), queue: Promise.resolve(), channel: null, api: null, dirty: false, members: {}, raw: new Map(), base: new Map() };
 
 // حالة شخصية لكل مستخدم: لا تُرفع مع الصفحة حتى لا تتغير مفضلة زميلك أو شجرته أو موضعه في اللوحة
 const PERSONAL = ['fav', 'open', 'cam', 'view'];
 function shared(p) { const o = {}; for (const k in p) if (!PERSONAL.includes(k)) o[k] = p[k]; return o }
 function personalOf(p) { const o = {}; PERSONAL.forEach(k => { if (p[k] !== undefined) o[k] = p[k] }); return o }
 // ترتيب ثابت للمفاتيح: jsonb يعيد ترتيبها، فبدونه نخطئ في تمييز صدى تعديلاتنا
-function stable(v) {
-  if (Array.isArray(v)) return '[' + v.map(stable).join(',') + ']';
-  if (v && typeof v === 'object') return '{' + Object.keys(v).sort().filter(k => v[k] !== undefined).map(k => JSON.stringify(k) + ':' + stable(v[k])).join(',') + '}';
-  return JSON.stringify(v === undefined ? null : v);
-}
+const { stable, merge3 } = window.MidadMerge;
+const clone = v => JSON.parse(JSON.stringify(v));
+// st.base: آخر نسخة نعرف أنها على الخادم لكل صفحة {data, at} — أساس الدمج الثلاثي والحفظ المشروط
 const sig = p => stable(shared(p));
 
+// التخزين المحلي قد يكون معطّلاً (تصفح خاص، إعدادات صارمة): لا نسمح له بإيقاف التطبيق
+function lsGet(k) { try { return localStorage.getItem(k) } catch (e) { return null } }
+function lsSet(k, v) { try { localStorage.setItem(k, v) } catch (e) {} }
+function lsDel(k) { try { localStorage.removeItem(k) } catch (e) {} }
 function readJSON(k, d) { try { return JSON.parse(localStorage.getItem(k)) || d } catch (e) { return d } }
 function writeJSON(k, v) { try { localStorage.setItem(k, JSON.stringify(v)) } catch (e) {} }
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]) }
@@ -98,7 +100,7 @@ async function createWorkspace(name) {
 async function fetchPages(wsId) {
   const out = [];
   for (let from = 0; ; from += 500) {
-    const { data, error } = await sb.from('pages').select('id, data').eq('workspace_id', wsId).range(from, from + 499);
+    const { data, error } = await sb.from('pages').select('id, data, updated_at').eq('workspace_id', wsId).range(from, from + 499);
     if (error) throw error;
     out.push(...data);
     if (data.length < 500) break;
@@ -111,33 +113,55 @@ async function fetchPages(wsId) {
 function persist(db) {
   const started = Date.now();
   const job = st.queue.then(async () => {
-    const ws = st.ws.id, ups = [], seen = new Set();
-    for (const p of Object.values(db.pages)) {
-      seen.add(p.id);
-      // فحص سريع أولاً (JSON الأصلي أسرع بكثير)، والترتيب الثابت فقط للصفحات التي تغيّرت فعلاً
-      const raw = JSON.stringify(p);
-      if (st.raw.get(p.id) === raw && st.sent.has(p.id)) continue;
-      const j = sig(p);
-      if (st.sent.get(p.id) !== j) ups.push({ workspace_id: ws, id: p.id, data: shared(p), _j: j, _raw: raw });
-      else st.raw.set(p.id, raw);
+    const ws = st.ws.id;
+    for (let round = 0; round < 6; round++) {
+      const ups = [], seen = new Set();
+      for (const p of Object.values(db.pages)) {
+        seen.add(p.id);
+        // فحص سريع أولاً (JSON الأصلي أسرع بكثير)، والترتيب الثابت فقط للصفحات التي تغيّرت فعلاً
+        const raw = JSON.stringify(p);
+        if (st.raw.get(p.id) === raw && st.sent.has(p.id)) continue;
+        const j = sig(p);
+        if (st.sent.get(p.id) !== j) ups.push({ id: p.id, data: shared(p), j, raw });
+        else st.raw.set(p.id, raw);
+      }
+      const conflicts = [];
+      for (let i = 0; i < ups.length; i += 50) {
+        const chunk = ups.slice(i, i + 50);
+        const { data, error } = await sb.rpc('save_pages', { ws, items: chunk.map(u => ({ id: u.id, data: u.data, base: st.base.has(u.id) ? st.base.get(u.id).at : null })) });
+        if (error) throw error;
+        const by = new Map(chunk.map(u => [u.id, u]));
+        data.saved.forEach(s => { const u = by.get(s.id); st.sent.set(u.id, u.j); st.raw.set(u.id, u.raw); st.base.set(u.id, { data: clone(u.data), at: s.at }) });
+        conflicts.push(...data.conflicts);
+      }
+      if (round === 0) {
+        const dels = [...st.sent.keys()].filter(id => !seen.has(id));
+        if (dels.length) {
+          const { error } = await sb.from('pages').delete().eq('workspace_id', ws).in('id', dels);
+          if (error) throw error;
+          dels.forEach(id => { st.sent.delete(id); st.raw.delete(id); st.base.delete(id) });
+        }
+      }
+      if (!conflicts.length) return;
+      // أحد غيّر الصفحة قبلنا: ندمج نسخته مع نسختنا ثم نعيد المحاولة
+      const merged = [];
+      for (const k of conflicts) {
+        const local = db.pages[k.id];
+        if (k.data === null) { st.base.delete(k.id); st.sent.delete(k.id); continue }   // حُذفت من الخادم: نعيد إنشاءها
+        const b = st.base.get(k.id);
+        st.base.set(k.id, { data: clone(k.data), at: k.at });
+        st.sent.set(k.id, stable(k.data));
+        if (local) merged.push(Object.assign(merge3(b && b.data, shared(local), k.data), personalOf(local)));
+      }
+      if (merged.length) st.api.applyRemote(merged, []);
     }
-    const dels = [...st.sent.keys()].filter(id => !seen.has(id));
-    for (let i = 0; i < ups.length; i += 100) {
-      const chunk = ups.slice(i, i + 100);
-      const { error } = await sb.from('pages').upsert(chunk.map(({ _j, _raw, ...r }) => r));
-      if (error) throw error;
-      chunk.forEach(r => { st.sent.set(r.id, r._j); st.raw.set(r.id, r._raw) });
-    }
-    if (dels.length) {
-      const { error } = await sb.from('pages').delete().eq('workspace_id', ws).in('id', dels);
-      if (error) throw error;
-      dels.forEach(id => { st.sent.delete(id); st.raw.delete(id) });
-    }
+    throw new Error('تعارض متكرر في الحفظ، أعد المحاولة');
   });
   job.then(() => { if (st.dirtyAt <= started) st.dirty = false; clearTimeout(retryT) }, () => scheduleRetry());
   st.queue = job.catch(() => {});
   return job;
 }
+
 let retryT;
 function scheduleRetry() {
   clearTimeout(retryT);
@@ -200,30 +224,44 @@ function purgeOldTrash() {
   st.api.save();
 }
 
-let remoteUps = new Map(), remoteDels = new Set(), remoteT;
+// الأحدث من الخادم: نقارن أوقات التعديل بالميكروثانية لنتجاهل أي حدث قديم يصل متأخراً
+const tsKey = s => { if (!s) return 0; const m = String(s).match(/^(.*?)(?:.(d+))?([+-]dd:?dd|Z)?$/); const base = Date.parse((m[1] || s) + (m[3] || 'Z')); return base * 1000 + Number(((m[2] || '') + '000000').slice(0, 6)) };
+let incoming = new Map(), remoteT;
 function onRemote(payload) {
   if (!st.api) return;
   if (payload.eventType === 'DELETE') {
     const o = payload.old || {};
     if (o.workspace_id && o.workspace_id !== st.ws.id) return;
     if (!st.sent.has(o.id)) return;
-    st.sent.delete(o.id); remoteDels.add(o.id); remoteUps.delete(o.id);
+    incoming.set(o.id, null);
   } else {
     const r = payload.new;
     if (!r || r.workspace_id !== st.ws.id) return;
-    const j = stable(r.data);
-    if (st.sent.get(r.id) === j) return; // صدى تعديلنا نحن
-    st.sent.set(r.id, j);
-    const mine = st.api.db.pages[r.id];
-    remoteUps.set(r.id, Object.assign(shared(r.data), mine ? personalOf(mine) : {})); remoteDels.delete(r.id);
+    const b = st.base.get(r.id);
+    if (b && tsKey(b.at) >= tsKey(r.updated_at)) return;   // نعرف هذه النسخة أو أحدث منها (منها صدى حفظنا)
+    incoming.set(r.id, r);
     if (r.updated_by && r.updated_by !== st.user.id && st.api.page && st.api.page.id === r.id) noteRemoteEdit(r.updated_by);
   }
   clearTimeout(remoteT);
-  remoteT = setTimeout(() => {
-    const u = [...remoteUps.values()], d = [...remoteDels];
-    remoteUps = new Map(); remoteDels = new Set();
-    st.api.applyRemote(u, d);
-  }, 200);
+  remoteT = setTimeout(flushIncoming, 120);
+}
+// الدمج يتم لحظة التطبيق (لا لحظة الوصول) حتى يشمل آخر ما كتبه المستخدم
+function flushIncoming() {
+  const ups = [], dels = [], db = st.api.db;
+  for (const [id, r] of incoming) {
+    if (r === null) { st.sent.delete(id); st.raw.delete(id); st.base.delete(id); dels.push(id); continue }
+    const b = st.base.get(id), local = db.pages[id];
+    const localShared = local && shared(local);
+    const pending = local && st.sent.get(id) !== stable(localShared);   // عندنا تعديل لم يصل للخادم بعد
+    const next = pending ? merge3(b && b.data, localShared, r.data) : shared(r.data);
+    st.base.set(id, { data: clone(r.data), at: r.updated_at });
+    st.sent.set(id, stable(r.data));
+    ups.push(Object.assign(next, local ? personalOf(local) : {}));
+  }
+  incoming = new Map();
+  if (ups.length || dels.length) st.api.applyRemote(ups, dels);
+  // إن أنتج الدمج شيئاً ليس على الخادم، نحفظه
+  if (ups.some(p => st.sent.get(p.id) !== sig(p))) st.api.save();
 }
 function subscribe() {
   if (st.channel) sb.removeChannel(st.channel);
@@ -305,15 +343,15 @@ async function openHistory() {
 /* ---------- تشغيل مساحة ---------- */
 let started = false;
 async function openWorkspace(ws) {
-  if (started) { localStorage.setItem(LAST_WS, ws.id); location.reload(); return }
+  if (started) { lsSet(LAST_WS, ws.id); location.reload(); return }
   st.ws = ws; st.role = ws.role;
-  localStorage.setItem(LAST_WS, ws.id);
+  lsSet(LAST_WS, ws.id);
   $('#bootMsg').textContent = 'تحميل الصفحات…';
   const rows = await fetchPages(ws.id);
   const pages = {};
   const prefs = readJSON(PREFS, {});
   const mine = (prefs.personal || {})[ws.id] || {};
-  rows.forEach(r => { st.sent.set(r.id, stable(r.data)); pages[r.id] = Object.assign(r.data, mine[r.id] || {}) });
+  rows.forEach(r => { st.sent.set(r.id, stable(r.data)); st.base.set(r.id, { data: clone(r.data), at: r.updated_at }); pages[r.id] = Object.assign(r.data, mine[r.id] || {}) });
   const db = rows.length ? { pages, current: (prefs.current || {})[ws.id], theme: prefs.theme || 'system', collapsed: prefs.collapsed, ver: 4 } : null;
   if (db && !pages[db.current]) db.current = Object.keys(pages)[0];
   $('#boot').hidden = true; $('#auth').hidden = true; $('#app').hidden = false;
@@ -344,7 +382,7 @@ async function afterLogin(user) {
       const w = await createWorkspace('مساحة ' + (user.email || '').split('@')[0]);
       st.workspaces = [{ id: w.id, name: w.name, role: 'owner' }];
     }
-    const last = localStorage.getItem(LAST_WS);
+    const last = lsGet(LAST_WS);
     await openWorkspace(st.workspaces.find(w => w.id === last) || st.workspaces[0]);
   } catch (e) {
     $('#bootMsg').textContent = 'تعذّر تحميل مساحة العمل: ' + arErr(e);
@@ -428,7 +466,7 @@ async function openWsModal() {
   if ($('#leaveWs')) $('#leaveWs').onclick = async () => {
     if (!confirm('مغادرة المساحة؟ لن ترى صفحاتها بعد ذلك.')) return;
     const { error } = await sb.from('members').delete().eq('workspace_id', st.ws.id).eq('user_id', st.user.id);
-    if (error) st.api.toast(arErr(error)); else { localStorage.removeItem(LAST_WS); location.reload() }
+    if (error) st.api.toast(arErr(error)); else { lsDel(LAST_WS); location.reload() }
   };
   $('#expBtn').onclick = () => {
     const blob = new Blob([JSON.stringify({ app: 'midad', version: 4, workspace: st.ws.name, exported_at: new Date().toISOString(), pages: st.api.db.pages }, null, 1)], { type: 'application/json' });
@@ -449,7 +487,7 @@ async function openWsModal() {
       $('#wsModal').hidden = true; st.api.toast('تم الاستيراد');
     } catch (err) { st.api.toast('تعذّر الاستيراد: ' + arErr(err)) }
   };
-  $('#signOut').onclick = async () => { await sb.auth.signOut(); localStorage.removeItem(LAST_WS); location.reload() };
+  $('#signOut').onclick = async () => { await sb.auth.signOut(); lsDel(LAST_WS); location.reload() };
 }
 
 /* ---------- البداية ---------- */
