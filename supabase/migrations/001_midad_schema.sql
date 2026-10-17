@@ -118,7 +118,8 @@ drop policy if exists ws_select on midad.workspaces;
 drop policy if exists ws_insert on midad.workspaces;
 drop policy if exists ws_update on midad.workspaces;
 drop policy if exists ws_delete on midad.workspaces;
-create policy ws_select on midad.workspaces for select to authenticated using (midad.can_read(id));
+-- created_by = auth.uid() ضروري: insert ... returning يتحقق من القراءة قبل أن تظهر عضوية المالك التي يضيفها الـ trigger
+create policy ws_select on midad.workspaces for select to authenticated using (created_by = auth.uid() or midad.can_read(id));
 create policy ws_insert on midad.workspaces for insert to authenticated with check (created_by = auth.uid());
 create policy ws_update on midad.workspaces for update to authenticated using (midad.is_owner(id)) with check (midad.is_owner(id));
 create policy ws_delete on midad.workspaces for delete to authenticated using (midad.is_owner(id));
