@@ -19,7 +19,7 @@ supabase/migrations/       مخطط قاعدة البيانات
 
 ## قاعدة البيانات
 
-تعيش في مشروع Supabase المشترك مع PQCS، لكن داخل مخطط مستقل اسمه **`midad`**؛ لا تلمس أي جدول في `public`.
+مشروع Supabase **مستقل خاص بمداد** (لا علاقة له بأي مشروع آخر)، والجداول في مخطط **`midad`**.
 
 | الجدول | المحتوى |
 |---|---|
@@ -32,9 +32,10 @@ supabase/migrations/       مخطط قاعدة البيانات
 
 ### الإعداد لأول مرة
 
-1. **SQL Editor** ← الصق `supabase/migrations/001_midad_schema.sql` ← Run.
-2. **Project Settings ← Data API ← Exposed schemas**: أضف `midad`.
-3. **Authentication ← URL Configuration**: أضف رابط GitHub Pages في Redirect URLs (لروابط تأكيد البريد واستعادة كلمة المرور).
+1. أنشئ مشروع Supabase جديداً، وضع رابطه ومفتاحه العام (anon / publishable) في `js/config.js`.
+2. **SQL Editor** ← الصق `supabase/migrations/001_midad_schema.sql` ← Run.
+3. **Project Settings ← Data API ← Exposed schemas**: أضف `midad`.
+4. **Authentication ← URL Configuration**: اجعل Site URL رابط GitHub Pages، وأضفه أيضاً في Redirect URLs (لروابط تأكيد البريد واستعادة كلمة المرور).
 
 ## التشغيل محلياً
 
@@ -44,6 +45,5 @@ npx serve .
 
 ## ملاحظات
 
-- المستخدمون (`auth.users`) مشتركون مع PQCS لأنهم على نفس المشروع. حساب في مداد يستطيع تسجيل الدخول تقنياً في Supabase الخاص بـ PQCS، فتأكد أن سياسات RLS في جداول PQCS لا تعطي كل `authenticated` صلاحية قراءة.
 - الصور حالياً تُحفظ داخل الصفحة نفسها (data URL). للصور الكثيرة يُفضّل نقلها إلى Supabase Storage.
 - عند تعديل شخصين نفس الصفحة في نفس اللحظة، آخر حفظ هو الذي يبقى.

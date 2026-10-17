@@ -2,6 +2,10 @@
 (function () {
 'use strict';
 const cfg = window.MIDAD_CONFIG;
+if (!cfg || /YOUR-/.test(cfg.url + cfg.anonKey)) {
+  document.getElementById('bootMsg').textContent = 'لم يُضبط الاتصال بقاعدة البيانات بعد: عدّل js/config.js';
+  return;
+}
 const sb = window.supabase.createClient(cfg.url, cfg.anonKey, {
   db: { schema: cfg.schema },
   auth: { persistSession: true, autoRefreshToken: true, storageKey: 'midad-auth' }
