@@ -14,7 +14,19 @@ const $ = s => document.querySelector(s);
 const PREFS = 'midad-prefs';
 const LAST_WS = 'midad-last-ws';
 
-const st = { user: null, ws: null, role: null, workspaces: [], sent: new Map(), queue: Promise.resolve(), channel: null, api: null };
+const st = { user: null, ws: null, role: null, workspaces: [], sent: new Map(), queue: Promise.resolve(), channel: null, api: null, dirty: false, members: {}, raw: new Map() };
+
+// حالة شخصية لكل مستخدم: لا تُرفع مع الصفحة حتى لا تتغير مفضلة زميلك أو شجرته أو موضعه في اللوحة
+const PERSONAL = ['fav', 'open', 'cam', 'view'];
+function shared(p) { const o = {}; for (const k in p) if (!PERSONAL.includes(k)) o[k] = p[k]; return o }
+function personalOf(p) { const o = {}; PERSONAL.forEach(k => { if (p[k] !== undefined) o[k] = p[k] }); return o }
+// ترتيب ثابت للمفاتيح: jsonb يعيد ترتيبها، فبدونه نخطئ في تمييز صدى تعديلاتنا
+function stable(v) {
+  if (Array.isArray(v)) return '[' + v.map(stable).join(',') + ']';
+  if (v && typeof v === 'object') return '{' + Object.keys(v).sort().filter(k => v[k] !== undefined).map(k => JSON.stringify(k) + ':' + stable(v[k])).join(',') + '}';
+  return JSON.stringify(v === undefined ? null : v);
+}
+const sig = p => stable(shared(p));
 
 function readJSON(k, d) { try { return JSON.parse(localStorage.getItem(k)) || d } catch (e) { return d } }
 function writeJSON(k, v) { try { localStorage.setItem(k, JSON.stringify(v)) } catch (e) {} }
@@ -97,34 +109,95 @@ async function fetchPages(wsId) {
 /* ---------- المزامنة ---------- */
 // نرسل فقط الصفحات التي تغيّر نصها منذ آخر إرسال، ونحذف ما اختفى محلياً
 function persist(db) {
+  const started = Date.now();
   const job = st.queue.then(async () => {
     const ws = st.ws.id, ups = [], seen = new Set();
     for (const p of Object.values(db.pages)) {
       seen.add(p.id);
-      const j = JSON.stringify(p);
-      if (st.sent.get(p.id) !== j) ups.push({ workspace_id: ws, id: p.id, data: p, _j: j });
+      // فحص سريع أولاً (JSON الأصلي أسرع بكثير)، والترتيب الثابت فقط للصفحات التي تغيّرت فعلاً
+      const raw = JSON.stringify(p);
+      if (st.raw.get(p.id) === raw && st.sent.has(p.id)) continue;
+      const j = sig(p);
+      if (st.sent.get(p.id) !== j) ups.push({ workspace_id: ws, id: p.id, data: shared(p), _j: j, _raw: raw });
+      else st.raw.set(p.id, raw);
     }
     const dels = [...st.sent.keys()].filter(id => !seen.has(id));
     for (let i = 0; i < ups.length; i += 100) {
       const chunk = ups.slice(i, i + 100);
-      const { error } = await sb.from('pages').upsert(chunk.map(({ _j, ...r }) => r));
+      const { error } = await sb.from('pages').upsert(chunk.map(({ _j, _raw, ...r }) => r));
       if (error) throw error;
-      chunk.forEach(r => st.sent.set(r.id, r._j));
+      chunk.forEach(r => { st.sent.set(r.id, r._j); st.raw.set(r.id, r._raw) });
     }
     if (dels.length) {
       const { error } = await sb.from('pages').delete().eq('workspace_id', ws).in('id', dels);
       if (error) throw error;
-      dels.forEach(id => st.sent.delete(id));
+      dels.forEach(id => { st.sent.delete(id); st.raw.delete(id) });
     }
   });
+  job.then(() => { if (st.dirtyAt <= started) st.dirty = false; clearTimeout(retryT) }, () => scheduleRetry());
   st.queue = job.catch(() => {});
   return job;
 }
+let retryT;
+function scheduleRetry() {
+  clearTimeout(retryT);
+  retryT = setTimeout(() => { if (navigator.onLine && st.api) st.api.save() }, 8000);
+}
+addEventListener('online', () => { if (st.dirty && st.api) st.api.save() });
+addEventListener('offline', () => { if (st.api) st.api.setStatus('غير متصل — التعديلات تنتظر') });
+addEventListener('beforeunload', e => { if (st.dirty) { e.preventDefault(); e.returnValue = '' } });
+
 function cacheLocal(db) {
   const prefs = readJSON(PREFS, {});
   prefs.theme = db.theme; prefs.collapsed = db.collapsed;
   prefs.current = Object.assign(prefs.current || {}, { [st.ws.id]: db.current });
+  const mine = {};
+  for (const p of Object.values(db.pages)) { const o = personalOf(p); if (Object.keys(o).length) mine[p.id] = o }
+  prefs.personal = Object.assign(prefs.personal || {}, { [st.ws.id]: mine });
   writeJSON(PREFS, prefs);
+}
+
+/* ---------- الصور في Supabase Storage ---------- */
+const BUCKET = 'midad', urlCache = new Map();
+async function uploadImage(blob) {
+  const path = st.ws.id + '/' + crypto.randomUUID() + '.jpg';
+  const { error } = await sb.storage.from(BUCKET).upload(path, blob, { contentType: blob.type || 'image/jpeg', cacheControl: '31536000' });
+  if (error) throw error;
+  return 'sb:' + path;
+}
+function resolveImage(ref) {
+  const path = ref.slice(3), hit = urlCache.get(path);
+  if (hit && hit.exp > Date.now()) return hit.p;
+  const p = sb.storage.from(BUCKET).createSignedUrl(path, 6 * 3600).then(({ data, error }) => { if (error) throw error; return data.signedUrl });
+  urlCache.set(path, { p, exp: Date.now() + 5 * 3600e3 });
+  p.catch(() => urlCache.delete(path));
+  return p;
+}
+// نقل الصور القديمة المضمّنة داخل الصفحات (data:) إلى التخزين، صفحةً صفحة في الخلفية
+async function migrateInlineImages() {
+  if (st.role === 'viewer') return;
+  const toBlob = d => fetch(d).then(r => r.blob());
+  let moved = 0;
+  for (const p of Object.values(st.api.db.pages)) {
+    const spots = [];
+    (p.blocks || []).forEach(b => { if (b.type === 'image' && typeof b.src === 'string' && b.src.startsWith('data:')) spots.push(b) });
+    (p.items || []).forEach(i => { if (i.type === 'image' && typeof i.src === 'string' && i.src.startsWith('data:')) spots.push(i) });
+    for (const o of spots) {
+      try { o.src = await uploadImage(await toBlob(o.src)); moved++ } catch (e) { return }
+    }
+  }
+  if (moved) st.api.save();
+}
+
+/* ---------- سلة المحذوفات: تُفرَّغ تلقائياً بعد ٣٠ يوماً ---------- */
+function purgeOldTrash() {
+  if (st.role === 'viewer') return;
+  const limit = Date.now() - 30 * 864e5, db = st.api.db;
+  const roots = Object.values(db.pages).filter(p => p.trashed && p.trashRoot === p.id && p.trashed < limit).map(p => p.id);
+  if (!roots.length) return;
+  const gone = Object.values(db.pages).filter(p => p.trashed && roots.includes(p.trashRoot)).map(p => p.id);
+  st.api.applyRemote([], gone);
+  st.api.save();
 }
 
 let remoteUps = new Map(), remoteDels = new Set(), remoteT;
@@ -138,9 +211,12 @@ function onRemote(payload) {
   } else {
     const r = payload.new;
     if (!r || r.workspace_id !== st.ws.id) return;
-    const j = JSON.stringify(r.data);
+    const j = stable(r.data);
     if (st.sent.get(r.id) === j) return; // صدى تعديلنا نحن
-    st.sent.set(r.id, j); remoteUps.set(r.id, r.data); remoteDels.delete(r.id);
+    st.sent.set(r.id, j);
+    const mine = st.api.db.pages[r.id];
+    remoteUps.set(r.id, Object.assign(shared(r.data), mine ? personalOf(mine) : {})); remoteDels.delete(r.id);
+    if (r.updated_by && r.updated_by !== st.user.id && st.api.page && st.api.page.id === r.id) noteRemoteEdit(r.updated_by);
   }
   clearTimeout(remoteT);
   remoteT = setTimeout(() => {
@@ -151,9 +227,79 @@ function onRemote(payload) {
 }
 function subscribe() {
   if (st.channel) sb.removeChannel(st.channel);
-  st.channel = sb.channel('midad-pages-' + st.ws.id)
+  st.channel = sb.channel('midad-ws-' + st.ws.id, { config: { presence: { key: st.user.id } } })
     .on('postgres_changes', { event: '*', schema: cfg.schema, table: 'pages', filter: 'workspace_id=eq.' + st.ws.id }, onRemote)
-    .subscribe();
+    .on('presence', { event: 'sync' }, renderPresence)
+    .subscribe(status => { if (status === 'SUBSCRIBED') trackPresence(true) });
+  setInterval(() => trackPresence(false), 1500);
+}
+
+/* ---------- من معي الآن ---------- */
+let lastTracked = null;
+function trackPresence(force) {
+  if (!st.channel || !st.api) return;
+  const page = st.api.page ? st.api.page.id : null;
+  if (!force && page === lastTracked) return;
+  lastTracked = page;
+  st.channel.track({ email: st.user.email, page });
+}
+function renderPresence() {
+  let box = $('#presence');
+  if (!box) { box = document.createElement('div'); box.id = 'presence'; box.className = 'presence'; $('#status').before(box) }
+  const cur = st.api && st.api.page ? st.api.page.id : null, state = st.channel.presenceState(), here = [];
+  for (const [uid, metas] of Object.entries(state)) {
+    if (uid === st.user.id) continue;
+    const m = metas[metas.length - 1];
+    if (m && m.page === cur) here.push(m.email || '');
+  }
+  box.innerHTML = here.slice(0, 4).map(e => '<span class="pav" title="' + esc(e) + ' في هذه الصفحة الآن">' + esc(e.charAt(0).toUpperCase()) + '</span>').join('') + (here.length > 4 ? '<span class="pav more">+' + (here.length - 4) + '</span>' : '');
+  box.hidden = !here.length;
+}
+setInterval(() => { if (st.channel) renderPresence() }, 2000);
+
+let noteT = 0;
+function noteRemoteEdit(uid) {
+  if (Date.now() - noteT < 20000) return;
+  noteT = Date.now();
+  st.api.toast((st.members[uid] || 'زميلك') + ' يعدّل هذه الصفحة الآن. تعديلاتكما تُحفظ، وأي نسخة سابقة تجدها في سجل الصفحة.');
+}
+
+async function loadMembers() {
+  const { data } = await sb.from('members').select('user_id, email').eq('workspace_id', st.ws.id);
+  (data || []).forEach(m => { st.members[m.user_id] = m.email });
+}
+
+/* ---------- سجل الصفحة ---------- */
+const CLOCK = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l3 2"/></svg>';
+function setupHistoryButton() {
+  if ($('#histBtn')) return;
+  const b = document.createElement('button');
+  b.className = 'ib'; b.id = 'histBtn'; b.title = 'سجل الصفحة'; b.setAttribute('aria-label', 'سجل الصفحة'); b.innerHTML = CLOCK;
+  $('#comBtn').before(b);
+  b.onclick = openHistory;
+}
+const fmtTime = t => new Date(t).toLocaleString('ar-SA-u-ca-gregory', { dateStyle: 'medium', timeStyle: 'short' });
+function textOf(p) {
+  return (p.blocks || []).map(b => (b.html || b.code || '').replace(/<[^>]+>/g, '')).filter(Boolean).join(' · ').slice(0, 220);
+}
+async function openHistory() {
+  const p = st.api.page; if (!p) return;
+  $('#wsModal').hidden = false;
+  $('#wsModal h2').textContent = 'سجل «' + (p.title || 'بدون عنوان') + '»';
+  const body = $('#wsBody'); body.innerHTML = '<p class="muted">تحميل…</p>';
+  const { data, error } = await sb.from('page_versions').select('id, data, saved_at, saved_by, reason')
+    .eq('workspace_id', st.ws.id).eq('page_id', p.id).order('saved_at', { ascending: false }).limit(100);
+  if (error) { body.innerHTML = '<p class="muted">تعذّر تحميل السجل: ' + esc(arErr(error)) + '</p>'; return }
+  if (!data.length) { body.innerHTML = '<p class="muted">لا توجد نسخ سابقة بعد. تُحفظ نسخة تلقائياً كل ١٠ دقائق من التعديل، وعند تعديل شخص آخر للصفحة.</p>'; return }
+  body.innerHTML = '<ul class="hist">' + data.map(v => '<li><div><b>' + fmtTime(v.saved_at) + '</b><small>' + esc(st.members[v.saved_by] || '') + '</small><p>' + esc(textOf(v.data) || '(صفحة فارغة)') + '</p></div>' + (st.role !== 'viewer' ? '<button class="tb" data-v="' + v.id + '">استرجاع</button>' : '') + '</li>').join('') + '</ul>';
+  body.querySelectorAll('[data-v]').forEach(btn => btn.onclick = () => {
+    const v = data.find(x => String(x.id) === btn.dataset.v);
+    if (!confirm('استرجاع نسخة ' + fmtTime(v.saved_at) + '؟ النسخة الحالية تبقى في السجل.')) return;
+    const cur = st.api.db.pages[p.id];
+    st.api.applyRemote([Object.assign(shared(v.data), cur ? personalOf(cur) : {}, { id: p.id, trashed: undefined, trashRoot: undefined, updated: Date.now() })], [], true);
+    st.api.save();
+    $('#wsModal').hidden = true; st.api.toast('تم الاسترجاع');
+  });
 }
 
 /* ---------- تشغيل مساحة ---------- */
@@ -165,14 +311,16 @@ async function openWorkspace(ws) {
   $('#bootMsg').textContent = 'تحميل الصفحات…';
   const rows = await fetchPages(ws.id);
   const pages = {};
-  rows.forEach(r => { pages[r.id] = r.data; st.sent.set(r.id, JSON.stringify(r.data)) });
   const prefs = readJSON(PREFS, {});
+  const mine = (prefs.personal || {})[ws.id] || {};
+  rows.forEach(r => { st.sent.set(r.id, stable(r.data)); pages[r.id] = Object.assign(r.data, mine[r.id] || {}) });
   const db = rows.length ? { pages, current: (prefs.current || {})[ws.id], theme: prefs.theme || 'system', collapsed: prefs.collapsed, ver: 4 } : null;
   if (db && !pages[db.current]) db.current = Object.keys(pages)[0];
   $('#boot').hidden = true; $('#auth').hidden = true; $('#app').hidden = false;
   started = true;
   window.startMidad({
-    db, persist, cacheLocal,
+    db, persist, cacheLocal, uploadImage, resolveImage,
+    markDirty() { st.dirty = true; st.dirtyAt = Date.now() },
     readOnly: st.role === 'viewer',
     onReady(api) {
       st.api = api;
@@ -182,6 +330,9 @@ async function openWorkspace(ws) {
   });
   renderAccount();
   subscribe();
+  loadMembers();
+  setupHistoryButton();
+  setTimeout(() => { purgeOldTrash(); migrateInlineImages() }, 1500);
 }
 
 async function afterLogin(user) {
@@ -215,6 +366,7 @@ $('#wsModal').addEventListener('mousedown', e => { if (e.target.id === 'wsModal'
 const ROLE = { owner: 'مالك', editor: 'محرر', viewer: 'قارئ' };
 async function openWsModal() {
   $('#wsModal').hidden = false;
+  $('#wsModal h2').textContent = 'مساحة العمل والفريق';
   const body = $('#wsBody'); body.innerHTML = '<p class="muted">تحميل…</p>';
   const isOwner = st.role === 'owner';
   const [{ data: mem }, inv] = await Promise.all([

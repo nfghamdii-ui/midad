@@ -248,7 +248,7 @@ if((db.ver||0)<4){
 const statusEl=$('#status');let saveT;
 function save(){
   if(opts.readOnly){statusEl.textContent='للقراءة فقط';return}
-  statusEl.textContent='يحفظ…';clearTimeout(saveT);
+  statusEl.textContent='يحفظ…';clearTimeout(saveT);if(opts.markDirty)opts.markDirty();
   saveT=setTimeout(()=>{opts.cacheLocal(db);opts.persist(db).then(()=>{statusEl.textContent='محفوظ'},err=>{statusEl.textContent='لم يُحفظ';toast('تعذّر الحفظ على الخادم: '+(err&&err.message||err),['إعادة المحاولة',save])})},400);
 }
 function setStatus(t){statusEl.textContent=t}
@@ -555,7 +555,7 @@ function renderBlock(b,num,p){
     case 'db':{const t=db.pages[b.pageId];const host=h('div','dbhost');host.style.flex='1';host.style.minWidth='0';host.dataset.dbhost=t.id;host.dataset.inline='1';renderDB(t,host,true);r.append(host);return r}
     case 'wb':{const t=db.pages[b.pageId];const l=h('button','plink');l.append(h('span','',icn(t)||'🎨'),h('span','nm',tt(t)),h('span','',''));const n=(t.items||[]).filter(i=>i.type!=='doc').length;if(n)l.append(h('small','plmeta',arn(n)+' عنصر على اللوحة'));l.onclick=()=>{t.mode='canvas';openPage(t.id)};r.append(l);return r}
     case 'image':{
-      if(b.src){const f=h('figure');const im=h('img');im.src=b.src;im.alt=b.caption||'صورة';const cap=h('figcaption');cap.dataset.ph='أضف وصفاً';cap.textContent=b.caption||'';
+      if(b.src){const f=h('figure');const im=h('img');setImg(im,b.src);im.alt=b.caption||'صورة';const cap=h('figcaption');cap.dataset.ph='أضف وصفاً';cap.textContent=b.caption||'';
         if(editable){cap.contentEditable=PCE;cap.oninput=()=>{b.caption=cap.textContent;touch(p);save()}}f.append(im,cap);r.append(f)}
       else{const ph=h('div','imgph');ph.innerHTML=IC.image;ph.append(h('span','','أضف صورة من جهازك'));const lb=h('label','','رفع صورة');const inp=h('input');inp.type='file';inp.accept='image/*';
         inp.onchange=()=>{const f=inp.files&&inp.files[0];if(f)loadImage(f,src=>{b.src=src;touch(p);renderPage();save()})};lb.append(inp);ph.append(lb);r.append(ph)}
@@ -592,12 +592,19 @@ function syncC(c){const r=c.closest('.block');if(!r)return;const b=findBlock(r.d
 function group(p,i){const ind=p.blocks[i].indent||0;let j=i+1;while(j<p.blocks.length&&(p.blocks[j].indent||0)>ind)j++;return [i,j]}
 function insertAfterGroup(b,nb){const p=page();const i=p.blocks.indexOf(b);const[,e]=group(p,i);p.blocks.splice(e,0,nb);return nb}
 function insertAfter(b,nb){const p=page();p.blocks.splice(p.blocks.indexOf(b)+1,0,nb);return nb}
+// تُصغَّر الصورة ثم تُرفع إلى التخزين؛ الصفحة تحفظ مرجعاً قصيراً (sb:...) بدل الصورة نفسها
 function loadImage(file,cb){
   const fr=new FileReader();fr.onload=()=>{const img=new Image();img.onload=()=>{const max=1400;let w=img.width,hh=img.height;if(w>max){hh=Math.round(hh*max/w);w=max}
     const cv=document.createElement('canvas');cv.width=w;cv.height=hh;const ctx=cv.getContext('2d');ctx.drawImage(img,0,0,w,hh);
-    let out;try{out=cv.toDataURL('image/jpeg',.82)}catch(e){out=fr.result}cb(out)};img.onerror=()=>toast('تعذّرت قراءة الصورة');img.src=fr.result};
+    const inline=()=>{let out;try{out=cv.toDataURL('image/jpeg',.82)}catch(e){out=fr.result}cb(out,w,hh)};
+    if(!opts.uploadImage){inline();return}
+    statusEl.textContent='يرفع الصورة…';
+    cv.toBlob(blob=>{if(!blob){inline();return}
+      opts.uploadImage(blob).then(ref=>cb(ref,w,hh),err=>{toast('تعذّر رفع الصورة: '+(err&&err.message||err));statusEl.textContent=''})},'image/jpeg',.82)};
+    img.onerror=()=>toast('تعذّرت قراءة الصورة');img.src=fr.result};
   fr.readAsDataURL(file);
 }
+function setImg(im,src){if(src&&src.startsWith('sb:')&&opts.resolveImage){im.classList.add('loading');opts.resolveImage(src).then(u=>{im.src=u;im.classList.remove('loading')},()=>{im.alt='تعذّر تحميل الصورة'})}else im.src=src}
 
 /* ---------- editing ---------- */
 const MD=[[/^###\s/,'h3'],[/^##\s/,'h2'],[/^#\s/,'h1'],[/^[-*•]\s/,'ul'],[/^(1|١)[.)]\s/,'ol'],[/^\[ ?\]\s/,'todo'],[/^>>\s/,'toggle'],[/^>\s/,'quote'],[/^```$/,'code'],[/^---$/,'divider']];
@@ -1002,9 +1009,19 @@ function renderDB(d,host,inline){
   tools.append(sr,so,nb);bar.append(tabs,tools);w.append(bar,body);host.append(w);
   renderBody(d,v,body);
 }
+// الجداول الكبيرة: نرسم أول دفعة فقط، والباقي بزر "عرض المزيد" — رسم ١٢٠٠ صف دفعة واحدة يجمّد الصفحة
+const ROW_STEP=100,rowLimit=new Map();
 function renderBody(d,v,body){
-  body.innerHTML='';const rs=viewRows(d,v);
+  body.innerHTML='';const all=viewRows(d,v);
+  const lim=v.type==='calendar'?Infinity:(rowLimit.get(d.id)||ROW_STEP);
+  const rs=all.length>lim?all.slice(0,lim):all;
   ({table:tableView,board:boardView,calendar:calView,list:listView,gallery:galView}[v.type]||tableView)(d,v,rs,body);
+  if(all.length>rs.length){
+    const more=h('button','dbmore','عرض المزيد ('+arn(Math.min(ROW_STEP,all.length-rs.length))+' من '+arn(all.length-rs.length)+' متبقية)');
+    more.onclick=()=>{rowLimit.set(d.id,lim+ROW_STEP);renderBody(d,v,body)};
+    const cnt=body.querySelector('.dbcount');if(cnt)cnt.textContent='العدد: '+arn(all.length);
+    body.append(more);
+  }
 }
 function glyph(pr){return '<span class="pg">'+esc(PG[pr.type]||'≡')+'</span>'}
 function tableView(d,v,rs,el){
@@ -1325,7 +1342,7 @@ function itemEl(it,o){
       s.append(shp);e.append(s);const t=tx();t.style.fontSize=(it.fs||18)+'px';e.append(t);break}
     case 'text':{const t=tx();t.style.fontSize=(it.fs||24)+'px';t.style.color=stroke(it.color);if(it.bold)t.style.fontWeight='700';e.append(t);break}
     case 'frame':{const t=h('div','ftitle itx',it.text||'إطار');t.dataset.id=it.id;t.dir=dirOf(it.text);e.append(t);if(it.color&&!['gray','white'].includes(it.color))e.style.background='color-mix(in srgb, '+stroke(it.color)+' 9%, var(--raised))';break}
-    case 'image':{const im=h('img');im.src=it.src;im.alt='';im.draggable=false;e.append(im);break}
+    case 'image':{const im=h('img');setImg(im,it.src);im.alt='';im.draggable=false;e.append(im);break}
     case 'doc':{e.dir='rtl';const t=o.page;const hd=h('div','doc-head');hd.append(h('span','',(icn(t)||'📄')+' '+tt(t)));e.append(hd);
       if(t.kind==='db'){const n=rowsOf(t).length;e.append(h('div','doc-prev','قاعدة بيانات • '+arn(n)+' صف'))}else{const pv=h('div','doc-prev');pv.textContent=(t.blocks||[]).map(btxt).filter(Boolean).slice(0,10).join('\n');e.append(pv)}break}
     case 'card':{e.dir='rtl';const t=db.pages[it.pageId];
@@ -1532,9 +1549,9 @@ function pickImage(pt){
 }
 function viewCenter(){const r=WB.el.vp.getBoundingClientRect(),m=$('#main').getBoundingClientRect(),c=cam();const sx=(Math.max(r.left,m.left)+Math.min(r.right,m.right))/2,sy=(Math.max(r.top,m.top+46)+Math.min(r.bottom,m.bottom))/2;return {x:(sx-r.left-c.x)/c.z,y:(sy-r.top-c.y)/c.z}}
 function placeImage(f,pt){
-  loadImage(f,src=>{const im=new Image();im.onload=()=>{let w=im.width,hh=im.height;const m=420;if(w>m){hh=hh*m/w;w=m}
+  loadImage(f,(src,w,hh)=>{const m=420;if(w>m){hh=hh*m/w;w=m}
     if(!pt)pt=viewCenter();
-    const it={id:uid(),type:'image',src,x:pt.x-w/2,y:pt.y-hh/2,w,h:hh};addItems([it]);setTool('select')};im.src=src});
+    const it={id:uid(),type:'image',src,x:pt.x-w/2,y:pt.y-hh/2,w,h:hh};addItems([it]);setTool('select')});
 }
 function bindBoard(vp){
   vp.addEventListener('pointerdown',onDown);
@@ -1843,14 +1860,16 @@ opts.cacheLocal(db);
 /* ---------- واجهة لـ cloud.js: تطبيق تغييرات زملاء الفريق ---------- */
 const api={
   get db(){return db},
+  get page(){return page()},
+  openPage,renderPage,
   save,setStatus,toast,
   // يستبدل صفحات وصلت من الخادم؛ لا يعيد رسم الصفحة المفتوحة إذا كان المستخدم يكتب فيها الآن
-  applyRemote(upserts,deletes){
+  applyRemote(upserts,deletes,force){
     const cur=db.current,editing=document.activeElement&&$('#main').contains(document.activeElement)&&document.activeElement!==document.body;
     let curChanged=false;
     upserts.forEach(p=>{
       const old=db.pages[p.id];
-      if(p.id===cur){if(editing)return;curChanged=true}
+      if(p.id===cur){if(editing&&!force)return;curChanged=true}
       // ندمج في نفس الكائن حتى تبقى المراجع التي تمسكها المحررات المفتوحة صالحة
       if(old){Object.keys(old).forEach(k=>{if(!(k in p))delete old[k]});Object.assign(old,p)}else db.pages[p.id]=p;
     });

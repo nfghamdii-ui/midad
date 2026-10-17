@@ -12,19 +12,21 @@
   --f-mono:"IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace;
 }
 @media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
-  --bg:#141817; --panel:#1a1f1d; --raised:#222826; --ink:#e5eae7; --muted:#99a39e; --faint:#5e6864;
-  --line:#2b322f; --hover:#262d2a; --press:#2f3733; --accent:#4cc2a6; --accent-ink:#0d1a16; --accent-soft:#1c3832;
-  --callout:#1e2522; --code:#1d2321; --danger:#e57a70; --danger-soft:#3a2321; --drop:#5ea4ec;
-  --overlay:rgba(0,0,0,.55); --shadow:0 14px 36px rgba(0,0,0,.55),0 1px 3px rgba(0,0,0,.4);
+  /* الوضع الداكن على ألوان Supabase */
+  --bg:#171717; --panel:#121212; --raised:#1f1f1f; --ink:#ededed; --muted:#a0a0a0; --faint:#6b6b6b;
+  --line:#2e2e2e; --hover:#242424; --press:#2e2e2e; --accent:#3ecf8e; --accent-ink:#0b1f15; --accent-soft:#18301f;
+  --callout:#1f1f1f; --code:#1c1c1c; --danger:#f2555a; --danger-soft:#3b1d1f; --drop:#3ecf8e;
+  --overlay:rgba(0,0,0,.6); --shadow:0 16px 40px rgba(0,0,0,.6),0 0 0 1px #2e2e2e;
   --k-gray:#a0a3a0; --k-brown:#c08f77; --k-orange:#ea9a55; --k-yellow:#dbb851; --k-green:#62c393;
-  --k-blue:#64a5e6; --k-purple:#b48ee0; --k-pink:#e283b6; --k-red:#ec7b74; --wbdot:#323a36; color-scheme:dark}}
+  --k-blue:#64a5e6; --k-purple:#b48ee0; --k-pink:#e283b6; --k-red:#ec7b74; --wbdot:#2e2e2e; color-scheme:dark}}
 :root[data-theme="dark"]{
-  --bg:#141817; --panel:#1a1f1d; --raised:#222826; --ink:#e5eae7; --muted:#99a39e; --faint:#5e6864;
-  --line:#2b322f; --hover:#262d2a; --press:#2f3733; --accent:#4cc2a6; --accent-ink:#0d1a16; --accent-soft:#1c3832;
-  --callout:#1e2522; --code:#1d2321; --danger:#e57a70; --danger-soft:#3a2321; --drop:#5ea4ec;
-  --overlay:rgba(0,0,0,.55); --shadow:0 14px 36px rgba(0,0,0,.55),0 1px 3px rgba(0,0,0,.4);
+  /* الوضع الداكن على ألوان Supabase */
+  --bg:#171717; --panel:#121212; --raised:#1f1f1f; --ink:#ededed; --muted:#a0a0a0; --faint:#6b6b6b;
+  --line:#2e2e2e; --hover:#242424; --press:#2e2e2e; --accent:#3ecf8e; --accent-ink:#0b1f15; --accent-soft:#18301f;
+  --callout:#1f1f1f; --code:#1c1c1c; --danger:#f2555a; --danger-soft:#3b1d1f; --drop:#3ecf8e;
+  --overlay:rgba(0,0,0,.6); --shadow:0 16px 40px rgba(0,0,0,.6),0 0 0 1px #2e2e2e;
   --k-gray:#a0a3a0; --k-brown:#c08f77; --k-orange:#ea9a55; --k-yellow:#dbb851; --k-green:#62c393;
-  --k-blue:#64a5e6; --k-purple:#b48ee0; --k-pink:#e283b6; --k-red:#ec7b74; --wbdot:#323a36; color-scheme:dark}
+  --k-blue:#64a5e6; --k-purple:#b48ee0; --k-pink:#e283b6; --k-red:#ec7b74; --wbdot:#2e2e2e; color-scheme:dark}
 
 [hidden]{display:none!important}
 html{height:100%;box-sizing:border-box}
@@ -533,3 +535,5 @@ tr:hover .rowdel,.rowdel:focus-visible{opacity:1}
 .ovtools{position:fixed;top:50%;transform:translateY(-50%);left:max(12px,env(safe-area-inset-left,0px));inset-inline-start:auto;z-index:9}
 @media (max-width:860px){.ovtools{top:auto;transform:none;bottom:calc(12px + env(safe-area-inset-bottom,0px));left:12px;right:12px}}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+.dbmore{display:block;width:100%;margin-top:6px;padding:8px;border:1px dashed var(--line);border-radius:6px;color:var(--muted);font-size:13px}
+.dbmore:hover{background:var(--hover);color:var(--ink)}
